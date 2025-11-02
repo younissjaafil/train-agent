@@ -5,20 +5,20 @@ const {
   uploadDocument,
   handleUploadError,
   validateFile,
-  extractUserId,
+  extractAgentId,
 } = require("../utils/uploadHelper");
 
 /**
  * Upload document to knowledge base
  * POST /train
- * Requires: user_id (in body) and file upload
+ * Requires: agent_id (in body) and file upload
  */
 router.post("/", uploadDocument, async (req, res) => {
   try {
-    const userId = extractUserId(req);
+    const agentId = extractAgentId(req);
     validateFile(req.file);
 
-    console.log(`Processing knowledge base upload for user: ${userId}`);
+    console.log(`Processing knowledge base upload for agent: ${agentId}`);
 
     // Processing options
     const options = {
@@ -31,7 +31,7 @@ router.post("/", uploadDocument, async (req, res) => {
     // Upload and process document
     const result = await knowledgeBaseService.uploadDocument(
       req.file.buffer,
-      userId,
+      agentId,
       req.file.originalname,
       req.file.mimetype,
       options
@@ -55,11 +55,11 @@ router.post("/", uploadDocument, async (req, res) => {
 /**
  * Search in knowledge base
  * POST /train/search
- * Requires: user_id and query in body
+ * Requires: agent_id and query in body
  */
 router.post("/search", async (req, res) => {
   try {
-    const userId = extractUserId(req);
+    const agentId = extractAgentId(req);
     const { query, limit, threshold, documentTypes } = req.body;
 
     if (!query) {
@@ -70,9 +70,9 @@ router.post("/search", async (req, res) => {
       });
     }
 
-    console.log(`Searching knowledge base for user ${userId}: "${query}"`);
+    console.log(`Searching knowledge base for agent ${agentId}: "${query}"`);
 
-    const results = await knowledgeBaseService.search(userId, query, {
+    const results = await knowledgeBaseService.search(agentId, query, {
       limit: parseInt(limit) || 10,
       threshold: parseFloat(threshold) || 0.7,
       includeContent: true,
@@ -96,17 +96,17 @@ router.post("/search", async (req, res) => {
 });
 
 /**
- * Get user's documents
+ * Get agent's documents
  * GET /train/documents
- * Requires: user_id in query or header
+ * Requires: agent_id in query or header
  */
 router.get("/documents", async (req, res) => {
   try {
-    const userId = extractUserId(req);
+    const agentId = extractAgentId(req);
 
-    console.log(`Fetching documents for user: ${userId}`);
+    console.log(`Fetching documents for agent: ${agentId}`);
 
-    const result = await knowledgeBaseService.getUserDocuments(userId, {
+    const result = await knowledgeBaseService.getAgentDocuments(agentId, {
       type: req.query.type,
       format: req.query.format,
       search: req.query.search,
@@ -131,19 +131,19 @@ router.get("/documents", async (req, res) => {
 /**
  * Get knowledge base statistics
  * GET /train/stats
- * Requires: user_id in query or header
+ * Requires: agent_id in query or header
  */
 router.get("/stats", async (req, res) => {
   try {
-    const userId = extractUserId(req);
+    const agentId = extractAgentId(req);
 
-    console.log(`Fetching stats for user: ${userId}`);
+    console.log(`Fetching stats for agent: ${agentId}`);
 
-    const stats = knowledgeBaseService.getUserStats(userId);
+    const stats = await knowledgeBaseService.getAgentStats(agentId);
 
     res.status(200).json({
       success: true,
-      userId,
+      agentId,
       stats,
     });
   } catch (error) {
@@ -159,16 +159,16 @@ router.get("/stats", async (req, res) => {
 /**
  * Delete document from knowledge base
  * DELETE /train/documents/:documentId
- * Requires: user_id in body/query/header
+ * Requires: agent_id in body/query/header
  */
 router.delete("/documents/:documentId", async (req, res) => {
   try {
-    const userId = extractUserId(req);
+    const agentId = extractAgentId(req);
     const { documentId } = req.params;
 
-    console.log(`Deleting document ${documentId} for user: ${userId}`);
+    console.log(`Deleting document ${documentId} for agent: ${agentId}`);
 
-    await knowledgeBaseService.deleteDocument(userId, documentId);
+    await knowledgeBaseService.deleteDocument(agentId, documentId);
 
     res.status(200).json({
       success: true,

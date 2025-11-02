@@ -1,18 +1,43 @@
 const s3Service = require("./s3Service");
 const documentProcessor = require("./documentProcessorService");
-const instanceManager = require("../utils/instanceManager");
+const databaseService = require("./databaseService");
 
 class KnowledgeBaseService {
   constructor() {
-    // In production, this would connect to a vector database like Pinecone, Weaviate, or Chroma
-    this.vectorStore = new Map(); // Temporary in-memory storage
-    this.userKnowledgeBases = new Map(); // User-specific knowledge bases
+    // PostgreSQL with pgvector for vector storage
+    this.db = databaseService;
+    this.hasPgVector = null; // Will be checked on first use
+  }
+
+  /**
+   * Initialize database connection
+   */
+  async initialize() {
+    await this.db.initialize();
+
+    // Check if pgvector extension is available
+    try {
+      const result = await this.db.query(
+        "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') as has_pgvector"
+      );
+      this.hasPgVector = result.rows[0].has_pgvector;
+      console.log(
+        `pgvector support: ${
+          this.hasPgVector
+            ? "✅ Enabled"
+            : "⚠️  Not available (using TEXT storage)"
+        }`
+      );
+    } catch (error) {
+      this.hasPgVector = false;
+      console.warn("Could not check pgvector availability, using TEXT storage");
+    }
   }
 
   /**
    * Upload and process document for knowledge base
    * @param {Buffer} fileBuffer - File buffer
-   * @param {string} userId - User ID
+   * @param {string} agentId - Agent ID (UUID or integer)
    * @param {string} originalName - Original filename
    * @param {string} mimetype - File MIME type
    * @param {Object} options - Processing options
@@ -20,18 +45,47 @@ class KnowledgeBaseService {
    */
   async uploadDocument(
     fileBuffer,
-    userId,
+    agentId,
     originalName,
     mimetype,
     options = {}
   ) {
+    const client = await this.db.getClient();
     try {
+      await client.query("BEGIN");
+
       // Validate file type
       if (!documentProcessor.isSupported(mimetype, originalName)) {
         throw new Error(`Unsupported file type: ${originalName}`);
       }
 
-      console.log(`Processing document for user ${userId}: ${originalName}`);
+      console.log(`Processing document for agent ${agentId}: ${originalName}`);
+
+      // Get agent from database and verify it exists
+      const dbAgentId = await this.db.getAgentId(agentId);
+      if (!dbAgentId) {
+        throw new Error(`Agent not found: ${agentId}`);
+      }
+
+      // Get instructor (user) ID from agent
+      const agentResult = await client.query(
+        "SELECT instructor_id FROM agents WHERE id = $1",
+        [dbAgentId]
+      );
+
+      if (agentResult.rows.length === 0) {
+        throw new Error(`Agent not found: ${agentId}`);
+      }
+
+      const instructorId = agentResult.rows[0].instructor_id;
+
+      // Get user_id string for S3 folder structure
+      const userResult = await client.query(
+        "SELECT user_id FROM users WHERE id = $1",
+        [instructorId]
+      );
+
+      const userId = userResult.rows[0].user_id;
 
       // Upload to S3 with organized folder structure
       const s3Result = await s3Service.uploadDocument(
@@ -49,66 +103,71 @@ class KnowledgeBaseService {
         options
       );
 
-      // Store in vector database (in-memory for now)
-      const documentId = `${userId}_${Date.now()}_${originalName.replace(
-        /[^a-zA-Z0-9]/g,
-        "_"
-      )}`;
+      // Determine source_type from file extension/mimetype
+      const sourceType = this.getSourceType(mimetype, originalName);
 
-      const knowledgeEntry = {
-        id: documentId,
-        userId,
-        originalName,
-        mimetype,
-        s3Key: s3Result.key,
-        s3Url: s3Result.publicUrl,
-        folderType: s3Result.folderType,
-        content: ragResult.content,
-        chunks: ragResult.chunks,
-        embeddings: ragResult.embeddings,
-        metadata: {
-          ...ragResult.metadata,
-          ...ragResult.ragMetadata,
-          uploadedAt: new Date().toISOString(),
-          fileSize: fileBuffer.length,
-          folderType: s3Result.folderType,
-        },
-        type: ragResult.type,
-        format: ragResult.format,
-      };
+      // Insert into knowledge_sources table
+      const knowledgeResult = await client.query(
+        `INSERT INTO knowledge_sources 
+         (instructor_id, agent_id, title, file_url, file_type, size_mb, processed) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7) 
+         RETURNING id`,
+        [
+          instructorId,
+          dbAgentId,
+          originalName,
+          s3Result.publicUrl,
+          sourceType,
+          fileBuffer.length / (1024 * 1024), // Convert to MB
+          true,
+        ]
+      );
 
-      // Store in user's knowledge base
-      if (!this.userKnowledgeBases.has(userId)) {
-        this.userKnowledgeBases.set(userId, new Map());
+      const knowledgeSourceId = knowledgeResult.rows[0].id;
+
+      // Store training data with embeddings in agent_training_data
+      for (let i = 0; i < ragResult.embeddings.length; i++) {
+        const embeddingData = ragResult.embeddings[i];
+
+        // Convert embedding array to appropriate format
+        let embeddingVector;
+        let insertQuery;
+
+        if (this.hasPgVector) {
+          // Use pgvector format: [1,2,3,...]
+          embeddingVector = `[${embeddingData.embedding.join(",")}]`;
+          insertQuery = `INSERT INTO agent_training_data 
+           (agent_id, title, content, source_type, file_url, embedding_vector) 
+           VALUES ($1, $2, $3, $4, $5, $6::vector)`;
+        } else {
+          // Use JSON string format for TEXT column
+          embeddingVector = JSON.stringify(embeddingData.embedding);
+          insertQuery = `INSERT INTO agent_training_data 
+           (agent_id, title, content, source_type, file_url, embedding_vector) 
+           VALUES ($1, $2, $3, $4, $5, $6)`;
+        }
+
+        await client.query(insertQuery, [
+          dbAgentId,
+          `${originalName} - Chunk ${i + 1}`,
+          embeddingData.chunk,
+          sourceType,
+          s3Result.publicUrl,
+          embeddingVector,
+        ]);
       }
-      this.userKnowledgeBases.get(userId).set(documentId, knowledgeEntry);
 
-      // Store embeddings in vector store
-      ragResult.embeddings.forEach((embeddingData, index) => {
-        const vectorId = `${documentId}_chunk_${index}`;
-        this.vectorStore.set(vectorId, {
-          id: vectorId,
-          documentId,
-          userId,
-          embedding: embeddingData.embedding,
-          chunk: embeddingData.chunk,
-          metadata: {
-            ...embeddingData.metadata,
-            chunkIndex: index,
-            documentName: originalName,
-          },
-        });
-      });
+      await client.query("COMMIT");
 
       console.log(
-        `Successfully processed document ${documentId} with ${ragResult.embeddings.length} chunks`
+        `Successfully processed document ${knowledgeSourceId} with ${ragResult.embeddings.length} chunks`
       );
 
       return {
         success: true,
-        documentId,
+        documentId: knowledgeSourceId,
         document: {
-          id: documentId,
+          id: knowledgeSourceId,
           name: originalName,
           type: ragResult.type,
           format: ragResult.format,
@@ -116,7 +175,13 @@ class KnowledgeBaseService {
           s3Key: s3Result.key,
           folderType: s3Result.folderType,
           chunksCount: ragResult.chunks.length,
-          metadata: knowledgeEntry.metadata,
+          metadata: {
+            ...ragResult.metadata,
+            ...ragResult.ragMetadata,
+            uploadedAt: new Date().toISOString(),
+            fileSize: fileBuffer.length,
+            folderType: s3Result.folderType,
+          },
         },
         upload: s3Result,
         processing: {
@@ -126,19 +191,38 @@ class KnowledgeBaseService {
         },
       };
     } catch (error) {
+      await client.query("ROLLBACK");
       console.error("Knowledge base upload error:", error);
       throw new Error(`Failed to process document: ${error.message}`);
+    } finally {
+      client.release();
     }
   }
 
   /**
-   * Search in user's knowledge base
-   * @param {string} userId - User ID
+   * Get source type from mimetype and filename
+   * @param {string} mimetype - File MIME type
+   * @param {string} filename - Filename
+   * @returns {string} Source type
+   */
+  getSourceType(mimetype, filename) {
+    if (mimetype.includes("pdf")) return "pdf";
+    if (mimetype.includes("word") || mimetype.includes("document"))
+      return "docx";
+    if (mimetype.includes("text")) return "text";
+    if (mimetype.includes("audio")) return "audio";
+    if (mimetype.includes("video")) return "video";
+    return "text"; // Default
+  }
+
+  /**
+   * Search in agent's knowledge base using vector similarity
+   * @param {string} agentId - Agent ID (UUID or integer)
    * @param {string} query - Search query
    * @param {Object} options - Search options
    * @returns {Promise<Array>} Search results
    */
-  async search(userId, query, options = {}) {
+  async search(agentId, query, options = {}) {
     try {
       const {
         limit = 10,
@@ -147,68 +231,144 @@ class KnowledgeBaseService {
         documentTypes = [],
       } = options;
 
-      console.log(`Searching knowledge base for user ${userId}: "${query}"`);
+      console.log(`Searching knowledge base for agent ${agentId}: "${query}"`);
 
-      // Generate query embedding (placeholder)
-      const queryEmbedding = this.generateQueryEmbedding(query);
-
-      // Find user's documents
-      const userKB = this.userKnowledgeBases.get(userId);
-      if (!userKB) {
-        return [];
+      // Get agent database ID
+      const dbAgentId = await this.db.getAgentId(agentId);
+      if (!dbAgentId) {
+        throw new Error(`Agent not found: ${agentId}`);
       }
 
-      // Search through vector store
-      const results = [];
-      for (const [vectorId, vectorData] of this.vectorStore) {
-        if (vectorData.userId !== userId) continue;
+      // Generate query embedding (placeholder - same as before)
+      const queryEmbedding = await this.generateQueryEmbedding(query);
 
-        // Filter by document type if specified
+      let result;
+
+      if (this.hasPgVector) {
+        // Use pgvector for efficient similarity search
+        const embeddingVector = `[${queryEmbedding.join(",")}]`;
+
+        let sqlQuery = `
+          SELECT 
+            atd.id,
+            atd.title,
+            atd.content,
+            atd.source_type,
+            atd.file_url,
+            atd.created_at,
+            ks.title as document_name,
+            ks.file_type,
+            1 - (atd.embedding_vector <=> $1::vector) as similarity
+          FROM agent_training_data atd
+          LEFT JOIN knowledge_sources ks ON atd.file_url = ks.file_url
+          WHERE atd.agent_id = $2
+        `;
+
+        const params = [embeddingVector, dbAgentId];
+        let paramIndex = 3;
+
+        // Filter by document types if specified
         if (documentTypes.length > 0) {
-          const doc = userKB.get(vectorData.documentId);
-          if (!doc || !documentTypes.includes(doc.type)) continue;
+          sqlQuery += ` AND atd.source_type = ANY($${paramIndex}::source_type[])`;
+          params.push(documentTypes);
+          paramIndex++;
         }
 
-        // Calculate similarity (cosine similarity placeholder)
-        const similarity = this.calculateSimilarity(
-          queryEmbedding,
-          vectorData.embedding
+        // Filter by similarity threshold
+        sqlQuery += ` AND (1 - (atd.embedding_vector <=> $1::vector)) >= $${paramIndex}`;
+        params.push(threshold);
+        paramIndex++;
+
+        // Order by similarity and limit
+        sqlQuery += ` ORDER BY similarity DESC LIMIT $${paramIndex}`;
+        params.push(limit);
+
+        result = await this.db.query(sqlQuery, params);
+      } else {
+        // Fallback: Fetch all embeddings and calculate similarity in-memory
+        console.log(
+          "pgvector not available - using in-memory similarity calculation"
         );
 
-        if (similarity >= threshold) {
-          results.push({
-            score: similarity,
-            documentId: vectorData.documentId,
-            chunkId: vectorData.id,
-            chunk: vectorData.chunk,
-            metadata: vectorData.metadata,
-          });
+        let sqlQuery = `
+          SELECT 
+            atd.id,
+            atd.title,
+            atd.content,
+            atd.source_type,
+            atd.file_url,
+            atd.created_at,
+            atd.embedding_vector,
+            ks.title as document_name,
+            ks.file_type
+          FROM agent_training_data atd
+          LEFT JOIN knowledge_sources ks ON atd.file_url = ks.file_url
+          WHERE atd.agent_id = $1
+        `;
+
+        const params = [dbAgentId];
+
+        // Filter by document types if specified
+        if (documentTypes.length > 0) {
+          sqlQuery += ` AND atd.source_type = ANY($2::source_type[])`;
+          params.push(documentTypes);
         }
+
+        const allChunks = await this.db.query(sqlQuery, params);
+
+        // Calculate similarity for each chunk
+        const chunksWithSimilarity = allChunks.rows
+          .map((row) => {
+            try {
+              // Parse JSON embedding
+              const storedEmbedding = JSON.parse(row.embedding_vector);
+              const similarity = this.calculateCosineSimilarity(
+                queryEmbedding,
+                storedEmbedding
+              );
+
+              return {
+                ...row,
+                similarity,
+              };
+            } catch (error) {
+              console.error(
+                `Error parsing embedding for chunk ${row.id}:`,
+                error
+              );
+              return null;
+            }
+          })
+          .filter((chunk) => chunk !== null && chunk.similarity >= threshold)
+          .sort((a, b) => b.similarity - a.similarity)
+          .slice(0, limit);
+
+        result = { rows: chunksWithSimilarity };
       }
 
-      // Sort by similarity score
-      results.sort((a, b) => b.score - a.score);
+      const results = result.rows.map((row) => ({
+        score: parseFloat(row.similarity),
+        documentId: row.id,
+        chunkId: row.id,
+        chunk: row.content,
+        metadata: {
+          title: row.title,
+          sourceType: row.source_type,
+          fileUrl: row.file_url,
+          createdAt: row.created_at,
+        },
+        document: includeContent
+          ? {
+              name: row.document_name,
+              type: row.file_type,
+              format: row.file_type,
+              uploadedAt: row.created_at,
+            }
+          : undefined,
+      }));
 
-      // Limit results
-      const limitedResults = results.slice(0, limit);
-
-      // Add document information if requested
-      if (includeContent) {
-        for (const result of limitedResults) {
-          const doc = userKB.get(result.documentId);
-          if (doc) {
-            result.document = {
-              name: doc.originalName,
-              type: doc.type,
-              format: doc.format,
-              uploadedAt: doc.metadata.uploadedAt,
-            };
-          }
-        }
-      }
-
-      console.log(`Found ${limitedResults.length} relevant chunks for query`);
-      return limitedResults;
+      console.log(`Found ${results.length} relevant chunks for query`);
+      return results;
     } catch (error) {
       console.error("Knowledge base search error:", error);
       throw new Error(`Search failed: ${error.message}`);
@@ -216,142 +376,248 @@ class KnowledgeBaseService {
   }
 
   /**
-   * Get user's knowledge base documents
-   * @param {string} userId - User ID
+   * Get agent's knowledge base documents
+   * @param {string} agentId - Agent ID (UUID or integer)
    * @param {Object} filters - Filter options
-   * @returns {Promise<Array>} List of documents
+   * @returns {Promise<Object>} List of documents with pagination
    */
-  async getUserDocuments(userId, filters = {}) {
+  async getAgentDocuments(agentId, filters = {}) {
     try {
-      const userKB = this.userKnowledgeBases.get(userId);
-      if (!userKB) {
-        return [];
+      const dbAgentId = await this.db.getAgentId(agentId);
+      if (!dbAgentId) {
+        return {
+          documents: [],
+          pagination: { total: 0, offset: 0, limit: 20, hasMore: false },
+        };
       }
 
-      let documents = Array.from(userKB.values());
+      let sqlQuery = `
+        SELECT 
+          ks.id,
+          ks.title,
+          ks.file_url,
+          ks.file_type,
+          ks.size_mb,
+          ks.processed,
+          ks.created_at,
+          COUNT(atd.id) as chunks_count
+        FROM knowledge_sources ks
+        LEFT JOIN agent_training_data atd ON ks.file_url = atd.file_url AND atd.agent_id = $1
+        WHERE ks.agent_id = $1
+      `;
+
+      const params = [dbAgentId];
+      let paramIndex = 2;
 
       // Apply filters
       if (filters.type) {
-        documents = documents.filter((doc) => doc.type === filters.type);
-      }
-
-      if (filters.format) {
-        documents = documents.filter((doc) => doc.format === filters.format);
+        sqlQuery += ` AND ks.file_type = $${paramIndex}::source_type`;
+        params.push(filters.type);
+        paramIndex++;
       }
 
       if (filters.search) {
-        const searchTerm = filters.search.toLowerCase();
-        documents = documents.filter(
-          (doc) =>
-            doc.originalName.toLowerCase().includes(searchTerm) ||
-            doc.content.toLowerCase().includes(searchTerm)
-        );
+        sqlQuery += ` AND ks.title ILIKE $${paramIndex}`;
+        params.push(`%${filters.search}%`);
+        paramIndex++;
       }
 
-      // Sort by upload date (newest first)
-      documents.sort(
-        (a, b) =>
-          new Date(b.metadata.uploadedAt) - new Date(a.metadata.uploadedAt)
-      );
+      sqlQuery += ` GROUP BY ks.id ORDER BY ks.created_at DESC`;
+
+      // Get total count
+      const countQuery = `
+        SELECT COUNT(DISTINCT ks.id) as total
+        FROM knowledge_sources ks
+        WHERE ks.agent_id = $1
+        ${filters.type ? ` AND ks.file_type = $2::source_type` : ""}
+        ${filters.search ? ` AND ks.title ILIKE $${filters.type ? 3 : 2}` : ""}
+      `;
+      const countParams = params.slice(0, paramIndex - 1);
+      const countResult = await this.db.query(countQuery, countParams);
+      const total = parseInt(countResult.rows[0]?.total || 0);
 
       // Apply pagination
       const offset = parseInt(filters.offset) || 0;
       const limit = parseInt(filters.limit) || 20;
-      const paginatedDocs = documents.slice(offset, offset + limit);
+
+      sqlQuery += ` LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+      params.push(limit, offset);
+
+      const result = await this.db.query(sqlQuery, params);
 
       return {
-        documents: paginatedDocs.map((doc) => ({
-          id: doc.id,
-          name: doc.originalName,
-          type: doc.type,
-          format: doc.format,
-          s3Url: doc.s3Url,
-          chunksCount: doc.chunks.length,
-          contentLength: doc.content.length,
-          uploadedAt: doc.metadata.uploadedAt,
-          fileSize: doc.metadata.fileSize,
+        documents: result.rows.map((row) => ({
+          id: row.id,
+          name: row.title,
+          type: row.file_type,
+          format: row.file_type,
+          s3Url: row.file_url,
+          chunksCount: parseInt(row.chunks_count),
+          contentLength: 0, // Not stored separately
+          uploadedAt: row.created_at,
+          fileSize: Math.round(row.size_mb * 1024 * 1024), // Convert MB to bytes
         })),
         pagination: {
-          total: documents.length,
+          total,
           offset,
           limit,
-          hasMore: offset + limit < documents.length,
+          hasMore: offset + limit < total,
         },
       };
     } catch (error) {
-      console.error("Get user documents error:", error);
+      console.error("Get agent documents error:", error);
       throw new Error(`Failed to get documents: ${error.message}`);
     }
   }
 
   /**
    * Delete document from knowledge base
-   * @param {string} userId - User ID
+   * @param {string} agentId - Agent ID (UUID or integer)
    * @param {string} documentId - Document ID
    * @returns {Promise<boolean>} Success status
    */
-  async deleteDocument(userId, documentId) {
+  async deleteDocument(agentId, documentId) {
+    const client = await this.db.getClient();
     try {
-      const userKB = this.userKnowledgeBases.get(userId);
-      if (!userKB || !userKB.has(documentId)) {
+      await client.query("BEGIN");
+
+      const dbAgentId = await this.db.getAgentId(agentId);
+      if (!dbAgentId) {
+        throw new Error("Agent not found");
+      }
+
+      // Get document info
+      const docResult = await client.query(
+        "SELECT file_url FROM knowledge_sources WHERE id = $1 AND agent_id = $2",
+        [documentId, dbAgentId]
+      );
+
+      if (docResult.rows.length === 0) {
         throw new Error("Document not found");
       }
 
-      const document = userKB.get(documentId);
+      const fileUrl = docResult.rows[0].file_url;
+
+      // Extract S3 key from URL
+      const s3Key = fileUrl.split(".amazonaws.com/")[1];
 
       // Delete from S3
-      await s3Service.deleteImage(document.s3Key);
-
-      // Remove from vector store
-      for (const [vectorId, vectorData] of this.vectorStore) {
-        if (vectorData.documentId === documentId) {
-          this.vectorStore.delete(vectorId);
-        }
+      if (s3Key) {
+        await s3Service.deleteImage(s3Key);
       }
 
-      // Remove from user's knowledge base
-      userKB.delete(documentId);
+      // Delete training data associated with this file and agent
+      await client.query(
+        "DELETE FROM agent_training_data WHERE file_url = $1 AND agent_id = $2",
+        [fileUrl, dbAgentId]
+      );
 
-      console.log(`Deleted document ${documentId} for user ${userId}`);
+      // Delete knowledge source
+      await client.query(
+        "DELETE FROM knowledge_sources WHERE id = $1 AND agent_id = $2",
+        [documentId, dbAgentId]
+      );
+
+      await client.query("COMMIT");
+
+      console.log(`Deleted document ${documentId} for agent ${agentId}`);
       return true;
     } catch (error) {
+      await client.query("ROLLBACK");
       console.error("Delete document error:", error);
       throw new Error(`Failed to delete document: ${error.message}`);
+    } finally {
+      client.release();
     }
+  }
+
+  /**
+   * Calculate cosine similarity between two vectors
+   * @param {Array<number>} vecA - First vector
+   * @param {Array<number>} vecB - Second vector
+   * @returns {number} Similarity score (0 to 1)
+   */
+  calculateCosineSimilarity(vecA, vecB) {
+    if (vecA.length !== vecB.length) {
+      throw new Error("Vectors must have the same length");
+    }
+
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+
+    for (let i = 0; i < vecA.length; i++) {
+      dotProduct += vecA[i] * vecB[i];
+      normA += vecA[i] * vecA[i];
+      normB += vecB[i] * vecB[i];
+    }
+
+    const magnitude = Math.sqrt(normA) * Math.sqrt(normB);
+
+    if (magnitude === 0) {
+      return 0;
+    }
+
+    return dotProduct / magnitude;
   }
 
   /**
    * Generate query embedding (placeholder)
    * @param {string} query - Search query
-   * @returns {Array} Query embedding
+   * @returns {Promise<Array>} Query embedding
    */
-  generateQueryEmbedding(query) {
-    // In production, use actual embedding service
+  async generateQueryEmbedding(query) {
+    // In production, use actual embedding service (OpenAI, Cohere, etc.)
+    // For now, return mock embedding
     return Array(1536)
       .fill(0)
       .map(() => Math.random());
   }
 
   /**
-   * Calculate similarity between embeddings (placeholder)
-   * @param {Array} embedding1 - First embedding
-   * @param {Array} embedding2 - Second embedding
-   * @returns {number} Similarity score
+   * Get knowledge base statistics for agent
+   * @param {string} agentId - Agent ID (UUID or integer)
+   * @returns {Promise<Object>} Statistics
    */
-  calculateSimilarity(embedding1, embedding2) {
-    // Simple cosine similarity placeholder
-    // In production, use proper vector similarity calculation
-    return Math.random() * 0.5 + 0.5; // Random score between 0.5-1.0
-  }
+  async getAgentStats(agentId) {
+    try {
+      const dbAgentId = await this.db.getAgentId(agentId);
+      if (!dbAgentId) {
+        return {
+          totalDocuments: 0,
+          totalChunks: 0,
+          documentTypes: {},
+          totalSize: 0,
+        };
+      }
 
-  /**
-   * Get knowledge base statistics for user
-   * @param {string} userId - User ID
-   * @returns {Object} Statistics
-   */
-  getUserStats(userId) {
-    const userKB = this.userKnowledgeBases.get(userId);
-    if (!userKB) {
+      const result = await this.db.query(
+        `
+        SELECT 
+          COUNT(DISTINCT ks.id) as total_documents,
+          COUNT(atd.id) as total_chunks,
+          COALESCE(SUM(ks.size_mb), 0) as total_size_mb,
+          json_object_agg(
+            COALESCE(ks.file_type::text, 'unknown'), 
+            COUNT(DISTINCT ks.id)
+          ) FILTER (WHERE ks.file_type IS NOT NULL) as document_types
+        FROM knowledge_sources ks
+        LEFT JOIN agent_training_data atd ON ks.file_url = atd.file_url AND atd.agent_id = $1
+        WHERE ks.agent_id = $1
+        `,
+        [dbAgentId]
+      );
+
+      const row = result.rows[0];
+
+      return {
+        totalDocuments: parseInt(row.total_documents) || 0,
+        totalChunks: parseInt(row.total_chunks) || 0,
+        documentTypes: row.document_types || {},
+        totalSize: Math.round(parseFloat(row.total_size_mb || 0) * 1024 * 1024), // Convert to bytes
+      };
+    } catch (error) {
+      console.error("Get agent stats error:", error);
       return {
         totalDocuments: 0,
         totalChunks: 0,
@@ -359,21 +625,6 @@ class KnowledgeBaseService {
         totalSize: 0,
       };
     }
-
-    const documents = Array.from(userKB.values());
-    const stats = {
-      totalDocuments: documents.length,
-      totalChunks: documents.reduce((sum, doc) => sum + doc.chunks.length, 0),
-      documentTypes: {},
-      totalSize: documents.reduce((sum, doc) => sum + doc.metadata.fileSize, 0),
-    };
-
-    // Count by type
-    documents.forEach((doc) => {
-      stats.documentTypes[doc.type] = (stats.documentTypes[doc.type] || 0) + 1;
-    });
-
-    return stats;
   }
 }
 

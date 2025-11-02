@@ -145,7 +145,7 @@ const validateFile = (file) => {
 };
 
 /**
- * Extract user ID from request
+ * Extract user ID from request (DEPRECATED - use extractAgentId)
  */
 const extractUserId = (req) => {
   // Try to get user ID from various sources (prioritize user_id with underscore)
@@ -162,6 +162,25 @@ const extractUserId = (req) => {
   }
 
   return userId;
+};
+
+/**
+ * Extract agent ID from request
+ */
+const extractAgentId = (req) => {
+  // Try to get agent ID from various sources (prioritize agent_id with underscore)
+  const agentId =
+    req.body.agent_id ||
+    req.body.agentId ||
+    req.query.agent_id ||
+    req.query.agentId ||
+    req.headers["x-agent-id"];
+
+  if (!agentId) {
+    throw new Error("Agent ID is required");
+  }
+
+  return agentId;
 };
 
 /**
@@ -184,5 +203,6 @@ module.exports = {
   handleUploadError,
   validateFile,
   extractUserId,
+  extractAgentId,
   validateImageRequest,
 };
