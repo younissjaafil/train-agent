@@ -3,11 +3,25 @@ const path = require("path");
 const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
 const axios = require("axios");
+const OpenAI = require("openai");
 // const cheerio = require("cheerio"); // Commented out for now, will use text parsing
 const { URL } = require("url");
 
 class DocumentProcessorService {
   constructor() {
+    // Initialize OpenAI client
+    this.openai = process.env.OPENAI_API_KEY
+      ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+      : null;
+
+    if (!this.openai) {
+      console.warn(
+        "⚠️  OpenAI API key not found - using MOCK embeddings (not production-ready)"
+      );
+    } else {
+      console.log("✅ OpenAI embeddings enabled");
+    }
+
     this.supportedTypes = {
       pdf: "application/pdf",
       doc: "application/msword",
@@ -404,24 +418,88 @@ class DocumentProcessorService {
   }
 
   /**
-   * Generate embeddings for text chunks (placeholder)
+   * Generate embeddings for text chunks using OpenAI
    * @param {Array} chunks - Text chunks
    * @returns {Promise<Array>} Array of embeddings
    */
   async generateEmbeddings(chunks) {
-    // Placeholder for embedding generation
-    // In production, integrate with OpenAI embeddings or similar service
-    return chunks.map((chunk, index) => ({
-      chunkIndex: index,
-      chunk,
-      embedding: Array(1536)
-        .fill(0)
-        .map(() => Math.random()), // Mock embedding
-      metadata: {
-        length: chunk.length,
-        wordCount: chunk.split(/\s+/).length,
-      },
-    }));
+    if (!this.openai) {
+      // Fallback to mock embeddings if OpenAI not configured
+      console.warn(
+        "Using MOCK embeddings - results will not be semantically accurate"
+      );
+      return chunks.map((chunk, index) => ({
+        chunkIndex: index,
+        chunk,
+        embedding: Array(1536)
+          .fill(0)
+          .map(() => Math.random()), // Mock embedding
+        metadata: {
+          length: chunk.length,
+          wordCount: chunk.split(/\s+/).length,
+        },
+      }));
+    }
+
+    // Process in batches to respect rate limits (max 3000 requests/min for tier 1)
+    const batchSize = 100;
+    const results = [];
+
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batch = chunks.slice(i, i + batchSize);
+
+      try {
+        // Call OpenAI embeddings API
+        const response = await this.openai.embeddings.create({
+          model: "text-embedding-3-small", // Cheaper & faster than ada-002
+          input: batch,
+          encoding_format: "float",
+        });
+
+        // Map embeddings to chunks
+        batch.forEach((chunk, idx) => {
+          results.push({
+            chunkIndex: i + idx,
+            chunk,
+            embedding: response.data[idx].embedding,
+            metadata: {
+              length: chunk.length,
+              wordCount: chunk.split(/\s+/).length,
+              model: "text-embedding-3-small",
+              dimensions: response.data[idx].embedding.length,
+            },
+          });
+        });
+
+        // Add delay between batches to avoid rate limits
+        if (i + batchSize < chunks.length) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+      } catch (error) {
+        console.error(
+          `Error generating embeddings for batch ${i}:`,
+          error.message
+        );
+
+        // If API fails, fall back to mock for this batch
+        batch.forEach((chunk, idx) => {
+          results.push({
+            chunkIndex: i + idx,
+            chunk,
+            embedding: Array(1536)
+              .fill(0)
+              .map(() => Math.random()),
+            metadata: {
+              length: chunk.length,
+              wordCount: chunk.split(/\s+/).length,
+              error: "OpenAI API call failed - using mock embedding",
+            },
+          });
+        });
+      }
+    }
+
+    return results;
   }
 
   /**

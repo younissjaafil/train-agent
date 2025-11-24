@@ -74,7 +74,7 @@ router.post("/search", async (req, res) => {
 
     const results = await knowledgeBaseService.search(agentId, query, {
       limit: parseInt(limit) || 10,
-      threshold: parseFloat(threshold) || 0.7,
+      threshold: parseFloat(threshold) || 0.5, // 0.5 is good for real embeddings (0.7+ for very similar content)
       includeContent: true,
       documentTypes: documentTypes || [],
     });

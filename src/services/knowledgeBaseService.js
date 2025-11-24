@@ -1,12 +1,24 @@
 const s3Service = require("./s3Service");
 const documentProcessor = require("./documentProcessorService");
 const databaseService = require("./databaseService");
+const OpenAI = require("openai");
 
 class KnowledgeBaseService {
   constructor() {
     // PostgreSQL with pgvector for vector storage
     this.db = databaseService;
     this.hasPgVector = null; // Will be checked on first use
+
+    // Initialize OpenAI client for query embeddings
+    this.openai = process.env.OPENAI_API_KEY
+      ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+      : null;
+
+    if (!this.openai) {
+      console.warn(
+        "⚠️  OpenAI API key not found for query embeddings - search will use MOCK embeddings"
+      );
+    }
   }
 
   /**
@@ -562,16 +574,36 @@ class KnowledgeBaseService {
   }
 
   /**
-   * Generate query embedding (placeholder)
+   * Generate query embedding using OpenAI
    * @param {string} query - Search query
    * @returns {Promise<Array>} Query embedding
    */
   async generateQueryEmbedding(query) {
-    // In production, use actual embedding service (OpenAI, Cohere, etc.)
-    // For now, return mock embedding
-    return Array(1536)
-      .fill(0)
-      .map(() => Math.random());
+    if (!this.openai) {
+      // Fallback to mock embedding if OpenAI not configured
+      console.warn(
+        "Using MOCK query embedding - search results will be random"
+      );
+      return Array(1536)
+        .fill(0)
+        .map(() => Math.random());
+    }
+
+    try {
+      const response = await this.openai.embeddings.create({
+        model: "text-embedding-3-small",
+        input: query,
+        encoding_format: "float",
+      });
+
+      return response.data[0].embedding;
+    } catch (error) {
+      console.error("Error generating query embedding:", error.message);
+      // Fallback to mock if API fails
+      return Array(1536)
+        .fill(0)
+        .map(() => Math.random());
+    }
   }
 
   /**
