@@ -164,7 +164,14 @@ class KnowledgeBaseService {
       await client.query("COMMIT");
 
       console.log(
-        `Successfully processed document ${knowledgeSourceId} with ${ragResult.embeddings.length} chunks`
+        `✅ Successfully processed document ${knowledgeSourceId} with ${ragResult.embeddings.length} chunks`
+      );
+      console.log(
+        `   Content: ${ragResult.content.length} chars → ${
+          ragResult.chunks.length
+        } chunks (avg: ${Math.round(
+          ragResult.content.length / ragResult.chunks.length
+        )} chars/chunk)`
       );
 
       return {

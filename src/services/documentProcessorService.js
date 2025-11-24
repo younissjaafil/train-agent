@@ -366,8 +366,8 @@ class DocumentProcessorService {
    */
   createChunks(content, options = {}) {
     const {
-      chunkSize = 1000,
-      overlap = 200,
+      chunkSize = 600,
+      overlap = 100,
       separators = ["\n\n", "\n", ". ", "! ", "? ", "; ", " "],
     } = options;
 
@@ -399,12 +399,14 @@ class DocumentProcessorService {
         chunks.push(chunk);
       }
 
-      // Fix: Ensure we always move forward to prevent infinite loop
-      const nextStart = Math.max(start + 1, end - overlap);
-      if (nextStart <= start) {
-        start = end; // Force progression if overlap is too large
-      } else {
-        start = nextStart;
+      // Move forward by (chunkSize - overlap) to maintain consistent chunk progression
+      // This ensures we don't create micro-chunks
+      if (end >= content.length) {
+        break; // Reached the end
+      }
+      start = end - overlap;
+      if (start <= chunks.length * (chunkSize - overlap) - chunkSize) {
+        start = end; // Prevent going backwards
       }
 
       // Safety check to prevent infinite loops

@@ -23,8 +23,8 @@ router.post("/", uploadDocument, async (req, res) => {
     // Processing options
     const options = {
       chunking: {
-        chunkSize: parseInt(req.body.chunkSize) || 1000,
-        overlap: parseInt(req.body.overlap) || 200,
+        chunkSize: parseInt(req.body.chunkSize) || 600,
+        overlap: parseInt(req.body.overlap) || 100,
       },
     };
 
