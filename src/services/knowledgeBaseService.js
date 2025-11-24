@@ -177,6 +177,7 @@ class KnowledgeBaseService {
 
       return {
         success: true,
+        agentId: agentId, // ✅ CRITICAL: Visual confirmation that agent_id was stored
         documentId: knowledgeSourceId,
         document: {
           id: knowledgeSourceId,
@@ -193,6 +194,7 @@ class KnowledgeBaseService {
             uploadedAt: new Date().toISOString(),
             fileSize: fileBuffer.length,
             folderType: s3Result.folderType,
+            agentId: agentId, // Also include in metadata for completeness
           },
         },
         upload: s3Result,
@@ -200,6 +202,7 @@ class KnowledgeBaseService {
           contentLength: ragResult.content.length,
           chunksGenerated: ragResult.chunks.length,
           embeddingsGenerated: ragResult.embeddings.length,
+          dbAgentId: dbAgentId, // Database integer ID for debugging
         },
       };
     } catch (error) {
@@ -250,6 +253,20 @@ class KnowledgeBaseService {
       if (!dbAgentId) {
         throw new Error(`Agent not found: ${agentId}`);
       }
+
+      // ✅ COMPREHENSIVE LOGGING: Track search parameters
+      console.log("\n========== RAG SEARCH DEBUG ==========");
+      console.log(`Agent ID (UUID/input): ${agentId}`);
+      console.log(`Agent ID (DB integer): ${dbAgentId}`);
+      console.log(`Query: "${query}"`);
+      console.log(`Query Length: ${query.length} chars`);
+      console.log(`Search Options:`, {
+        limit,
+        threshold,
+        includeContent,
+        documentTypes,
+      });
+      console.log("======================================\n");
 
       // Generate query embedding (placeholder - same as before)
       const queryEmbedding = await this.generateQueryEmbedding(query);
@@ -378,6 +395,34 @@ class KnowledgeBaseService {
             }
           : undefined,
       }));
+
+      // ✅ COMPREHENSIVE LOGGING: Show retrieval results
+      console.log("\n========== RAG RETRIEVAL RESULTS ==========");
+      console.log(`Matches Found: ${results.length}`);
+      if (results.length > 0) {
+        console.log(
+          `Similarity Scores:`,
+          results.map((r) => r.score.toFixed(4))
+        );
+        console.log(
+          `Top Match Preview:`,
+          results[0].chunk.substring(0, 200) + "..."
+        );
+        console.log(`Document Names:`, [
+          ...new Set(results.map((r) => r.document?.name).filter(Boolean)),
+        ]);
+      } else {
+        console.warn(
+          `⚠️ WARNING: No chunks found for agent ${agentId} (DB ID: ${dbAgentId})`
+        );
+        console.warn(`This means either:`);
+        console.warn(`  1. No documents uploaded for this agent`);
+        console.warn(
+          `  2. Query embedding doesn't match stored embeddings (threshold too high)`
+        );
+        console.warn(`  3. Agent ID mismatch between upload and retrieval`);
+      }
+      console.log("==========================================\n");
 
       console.log(`Found ${results.length} relevant chunks for query`);
       return results;

@@ -185,6 +185,80 @@ router.delete("/documents/:documentId", async (req, res) => {
   }
 });
 
+/**
+ * DEBUG ENDPOINT: Verify agent-specific retrieval
+ * POST /train/debug/verify
+ * Requires: agent_id and query in body
+ * Returns: Raw retrieved chunks with full metadata to prove retrieval filtering works
+ */
+router.post("/debug/verify", async (req, res) => {
+  try {
+    const agentId = extractAgentId(req);
+    const { query, limit, threshold } = req.body;
+
+    if (!query) {
+      return res.status(400).json({
+        success: false,
+        error: "Search query is required",
+        code: "MISSING_QUERY",
+      });
+    }
+
+    console.log("\n========== DEBUG VERIFICATION ENDPOINT ==========");
+    console.log(`Agent ID (from request): ${agentId}`);
+    console.log(`Query: "${query}"`);
+    console.log(`Limit: ${limit || 5}`);
+    console.log(`Threshold: ${threshold || 0.3}`);
+    console.log("================================================\n");
+
+    // Call search with debug mode (lower threshold for testing)
+    const results = await knowledgeBaseService.search(agentId, query, {
+      limit: parseInt(limit) || 5,
+      threshold: parseFloat(threshold) || 0.3, // Lower threshold for debugging
+      includeContent: true,
+      documentTypes: [],
+    });
+
+    // Return raw data with full metadata for debugging
+    res.status(200).json({
+      success: true,
+      debug: true,
+      request: {
+        agentId,
+        query,
+        limit: parseInt(limit) || 5,
+        threshold: parseFloat(threshold) || 0.3,
+      },
+      resultsCount: results.length,
+      matches: results.map((result) => ({
+        score: result.score,
+        chunkId: result.chunkId,
+        documentId: result.documentId,
+        agentId: agentId, // Explicitly show which agent this belongs to
+        text: result.chunk.substring(0, 500), // First 500 chars
+        fullText: result.chunk, // Complete chunk text
+        metadata: {
+          ...result.metadata,
+          documentName: result.document?.name,
+          documentType: result.document?.type,
+        },
+      })),
+      message:
+        results.length > 0
+          ? `✅ Successfully retrieved ${results.length} chunks for agent ${agentId}`
+          : `⚠️ No chunks found for agent ${agentId} with query "${query}"`,
+    });
+  } catch (error) {
+    console.error("Debug verification error:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      code: "DEBUG_VERIFICATION_ERROR",
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
+  }
+});
+
 // Error handling middleware
 router.use(handleUploadError);
 
