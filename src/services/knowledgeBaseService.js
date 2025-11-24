@@ -91,18 +91,10 @@ class KnowledgeBaseService {
 
       const instructorId = agentResult.rows[0].instructor_id;
 
-      // Get user_id string for S3 folder structure
-      const userResult = await client.query(
-        "SELECT user_id FROM users WHERE id = $1",
-        [instructorId]
-      );
-
-      const userId = userResult.rows[0].user_id;
-
-      // Upload to S3 with organized folder structure
+      // Upload to S3 with agent-specific folder structure (agentId/folderType/filename)
       const s3Result = await s3Service.uploadDocument(
         fileBuffer,
-        userId,
+        agentId, // Use agentId directly for S3 path organization
         originalName,
         mimetype
       );

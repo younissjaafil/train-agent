@@ -63,26 +63,26 @@ class S3Service {
   }
 
   /**
-   * Generate S3 key with user and type folder structure
-   * @param {string} userId - User ID
+   * Generate S3 key with agent and type folder structure
+   * @param {string} agentId - Agent ID (UUID or identifier)
    * @param {string} mimetype - File MIME type
    * @param {string} filename - Original filename
    * @returns {string} S3 key
    */
-  generateFileKey(userId, mimetype, filename) {
+  generateFileKey(agentId, mimetype, filename) {
     const folderType = this.getFolderByType(mimetype, filename);
     const cleanFilename = filename.replace(/[^a-zA-Z0-9.-]/g, "_");
-    return `${userId}/${folderType}/${cleanFilename}`;
+    return `${agentId}/${folderType}/${cleanFilename}`;
   }
 
   /**
-   * Upload file to S3 with user and type-specific folder structure
-   * @param {string} userId - User ID
+   * Upload file to S3 with agent and type-specific folder structure
+   * @param {string} agentId - Agent ID (UUID or identifier)
    * @param {Object} file - File object with buffer, originalname, mimetype
    * @returns {Promise<Object>} Upload result
    */
-  async uploadFile(userId, file) {
-    const key = this.generateFileKey(userId, file.mimetype, file.originalname);
+  async uploadFile(agentId, file) {
+    const key = this.generateFileKey(agentId, file.mimetype, file.originalname);
     const folderType = this.getFolderByType(file.mimetype, file.originalname);
 
     const params = {
@@ -91,7 +91,7 @@ class S3Service {
       Body: file.buffer,
       ContentType: file.mimetype,
       Metadata: {
-        userId: userId,
+        agentId: agentId,
         originalName: file.originalname,
         folderType: folderType,
         uploadDate: new Date().toISOString(),
@@ -105,7 +105,7 @@ class S3Service {
         location: result.Location,
         key: result.Key,
         bucket: result.Bucket,
-        userId: userId,
+        agentId: agentId,
         originalName: file.originalname,
         folderType: folderType,
         publicUrl: `${this.publicBaseUrl}/${result.Key}`,
@@ -119,13 +119,13 @@ class S3Service {
   /**
    * Upload document buffer to S3 for knowledge base
    * @param {Buffer} fileBuffer - File buffer
-   * @param {string} userId - User ID
+   * @param {string} agentId - Agent ID (UUID or identifier)
    * @param {string} originalName - Original filename
    * @param {string} mimetype - File MIME type
    * @returns {Promise<Object>} Upload result
    */
-  async uploadDocument(fileBuffer, userId, originalName, mimetype) {
-    const key = this.generateFileKey(userId, mimetype, originalName);
+  async uploadDocument(fileBuffer, agentId, originalName, mimetype) {
+    const key = this.generateFileKey(agentId, mimetype, originalName);
     const folderType = this.getFolderByType(mimetype, originalName);
 
     const params = {
@@ -134,7 +134,7 @@ class S3Service {
       Body: fileBuffer,
       ContentType: mimetype,
       Metadata: {
-        userId: userId,
+        agentId: agentId,
         originalName: originalName,
         folderType: folderType,
         uploadDate: new Date().toISOString(),
@@ -148,7 +148,7 @@ class S3Service {
         location: result.Location,
         key: result.Key,
         bucket: result.Bucket,
-        userId: userId,
+        agentId: agentId,
         originalName: originalName,
         folderType: folderType,
         publicUrl: `${this.publicBaseUrl}/${result.Key}`,
@@ -160,13 +160,13 @@ class S3Service {
   }
 
   /**
-   * List files for a specific user and optional type
-   * @param {string} userId - User ID
+   * List files for a specific agent and optional type
+   * @param {string} agentId - Agent ID (UUID or identifier)
    * @param {string} folderType - Optional folder type (docs, audio, video)
-   * @returns {Promise<Array>} List of user files
+   * @returns {Promise<Array>} List of agent files
    */
-  async listUserFiles(userId, folderType = null) {
-    const prefix = folderType ? `${userId}/${folderType}/` : `${userId}/`;
+  async listAgentFiles(agentId, folderType = null) {
+    const prefix = folderType ? `${agentId}/${folderType}/` : `${agentId}/`;
 
     const params = {
       Bucket: this.bucketName,
@@ -194,16 +194,16 @@ class S3Service {
     } catch (error) {
       console.error("S3 list error:", error);
       throw new Error(
-        `Failed to list files for user ${userId}: ${error.message}`
+        `Failed to list files for agent ${agentId}: ${error.message}`
       );
     }
   }
 
   /**
-   * Get all user folders (user IDs) in S3
-   * @returns {Promise<Array>} List of user IDs
+   * Get all agent folders (agent IDs) in S3
+   * @returns {Promise<Array>} List of agent IDs
    */
-  async listAllUsers() {
+  async listAllAgents() {
     const params = {
       Bucket: this.bucketName,
       Delimiter: "/",
@@ -217,20 +217,20 @@ class S3Service {
         prefix.Prefix.replace("/", "")
       );
     } catch (error) {
-      console.error("S3 list users error:", error);
-      throw new Error(`Failed to list users: ${error.message}`);
+      console.error("S3 list agents error:", error);
+      throw new Error(`Failed to list agents: ${error.message}`);
     }
   }
 
   /**
    * Get file from S3
-   * @param {string} userId - User ID
+   * @param {string} agentId - Agent ID (UUID or identifier)
    * @param {string} filename - Filename or full key
    * @returns {Promise<Object>} File data
    */
-  async getFile(userId, filename) {
-    // If filename contains userId path, use as-is, otherwise construct path
-    const key = filename.includes("/") ? filename : `${userId}/${filename}`;
+  async getFile(agentId, filename) {
+    // If filename contains agentId path, use as-is, otherwise construct path
+    const key = filename.includes("/") ? filename : `${agentId}/${filename}`;
 
     const params = {
       Bucket: this.bucketName,
@@ -253,12 +253,12 @@ class S3Service {
 
   /**
    * Delete file from S3
-   * @param {string} userId - User ID
+   * @param {string} agentId - Agent ID (UUID or identifier)
    * @param {string} filename - Filename or full key
    * @returns {Promise<void>}
    */
-  async deleteFile(userId, filename) {
-    const key = filename.includes("/") ? filename : `${userId}/${filename}`;
+  async deleteFile(agentId, filename) {
+    const key = filename.includes("/") ? filename : `${agentId}/${filename}`;
 
     const params = {
       Bucket: this.bucketName,
