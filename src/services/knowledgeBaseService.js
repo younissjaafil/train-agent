@@ -112,22 +112,46 @@ class KnowledgeBaseService {
       // Determine source_type from file extension/mimetype
       const sourceType = this.getSourceType(mimetype, originalName);
 
-      // Insert into knowledge_sources table
-      const knowledgeResult = await client.query(
-        `INSERT INTO knowledge_sources 
-         (instructor_id, agent_id, title, file_url, file_type, size_mb, processed) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7) 
-         RETURNING id`,
-        [
-          creatorId,
-          dbAgentId,
-          originalName,
-          s3Result.publicUrl,
-          sourceType,
-          fileBuffer.length / (1024 * 1024), // Convert to MB
-          true,
-        ]
-      );
+      // Insert into knowledge_sources table (try both column names for compatibility)
+      let knowledgeResult;
+      try {
+        // Try with instructor_id first (original schema)
+        knowledgeResult = await client.query(
+          `INSERT INTO knowledge_sources 
+           (instructor_id, agent_id, title, file_url, file_type, size_mb, processed) 
+           VALUES ($1, $2, $3, $4, $5, $6, $7) 
+           RETURNING id`,
+          [
+            creatorId,
+            dbAgentId,
+            originalName,
+            s3Result.publicUrl,
+            sourceType,
+            fileBuffer.length / (1024 * 1024), // Convert to MB
+            true,
+          ]
+        );
+      } catch (error) {
+        if (error.message.includes("instructor_id")) {
+          // Fallback: try with creator_id or without it
+          knowledgeResult = await client.query(
+            `INSERT INTO knowledge_sources 
+             (agent_id, title, file_url, file_type, size_mb, processed) 
+             VALUES ($1, $2, $3, $4, $5, $6) 
+             RETURNING id`,
+            [
+              dbAgentId,
+              originalName,
+              s3Result.publicUrl,
+              sourceType,
+              fileBuffer.length / (1024 * 1024), // Convert to MB
+              true,
+            ]
+          );
+        } else {
+          throw error;
+        }
+      }
 
       const knowledgeSourceId = knowledgeResult.rows[0].id;
 

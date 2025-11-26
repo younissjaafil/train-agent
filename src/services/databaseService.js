@@ -146,18 +146,20 @@ class DatabaseService {
    */
   async getAgentId(agentIdentifier) {
     try {
-      // First try to query by UUID (agent_id column)
-      let result = await this.query(
-        "SELECT id FROM agents WHERE agent_id = $1::uuid",
+      // Check if it's a number first (try by integer ID)
+      if (!isNaN(agentIdentifier)) {
+        const result = await this.query(
+          "SELECT id FROM agents WHERE id = $1::int",
+          [agentIdentifier]
+        );
+        return result.rows.length > 0 ? result.rows[0].id : null;
+      }
+
+      // Try to query by UUID (training_api_uuid column in actual schema)
+      const result = await this.query(
+        "SELECT id FROM agents WHERE training_api_uuid = $1::uuid",
         [agentIdentifier]
       );
-
-      // If not found and it's a number, try by integer ID
-      if (result.rows.length === 0 && !isNaN(agentIdentifier)) {
-        result = await this.query("SELECT id FROM agents WHERE id = $1::int", [
-          agentIdentifier,
-        ]);
-      }
 
       return result.rows.length > 0 ? result.rows[0].id : null;
     } catch (error) {
@@ -170,7 +172,7 @@ class DatabaseService {
    * Get or create agent ID by agent identifier
    * Auto-registers agent if it doesn't exist
    * @param {string} agentIdentifier - Agent UUID (new agents) or ID (existing)
-   * @param {Object} agentData - Optional agent data for creation
+   * @param {Object} agentData - Optional agent data for creation (name, description, creatorUserId, etc.)
    * @returns {Promise<number>} Database agent ID
    */
   async getOrCreateAgentId(agentIdentifier, agentData = {}) {
@@ -180,41 +182,45 @@ class DatabaseService {
       // Agent doesn't exist - auto-register it
       console.log(`Agent ${agentIdentifier} not found - auto-registering...`);
 
-      // Get or create default instructor user
-      const instructorUserId = agentData.instructorUserId || "AUTO_REGISTERED";
-      const instructorId = await this.getOrCreateUserId(instructorUserId, {
-        name: agentData.instructorName || "Auto-registered Instructor",
-        email:
-          agentData.instructorEmail || `${instructorUserId}@auto.generated`,
+      // Get or create default creator user
+      const creatorUserId = agentData.creatorUserId || "AUTO_REGISTERED";
+      const creatorId = await this.getOrCreateUserId(creatorUserId, {
+        name: agentData.creatorName || "Auto-registered Creator",
+        email: agentData.creatorEmail || `${creatorUserId}@auto.generated`,
         password: "auto_generated",
         role: "instructor",
         campus: "default",
       });
 
-      // Create new agent
+      // Create new agent with only required fields from actual schema
+      // Note: training_api_uuid needs to be explicitly set to the agentIdentifier
       const result = await this.query(
-        `INSERT INTO agents (instructor_id, name, description, model_type, temperature, visibility)
-         VALUES ($1, $2, $3, $4, $5, $6::visibility_type)
-         RETURNING id`,
+        `INSERT INTO agents (creator_id, name, description, training_api_uuid)
+         VALUES ($1, $2, $3, $4::uuid)
+         RETURNING id, training_api_uuid`,
         [
-          instructorId,
+          creatorId,
           agentData.name || `Agent ${agentIdentifier.substring(0, 8)}`,
           agentData.description || "Auto-registered agent for training",
-          agentData.modelType || "gpt-4",
-          agentData.temperature || 0.7,
-          agentData.visibility || "private",
+          agentIdentifier, // Use the provided UUID
         ]
       );
 
       dbAgentId = result.rows[0].id;
 
-      // Initialize agent stats
-      await this.query(
-        `INSERT INTO agent_stats (agent_id, total_conversations, total_messages, avg_rating)
-         VALUES ($1, 0, 0, 0.0)
-         ON CONFLICT (agent_id) DO NOTHING`,
-        [dbAgentId]
-      );
+      // Try to initialize agent stats (if table exists)
+      try {
+        await this.query(
+          `INSERT INTO agent_stats (agent_id, total_conversations, total_messages, avg_rating)
+           VALUES ($1, 0, 0, 0.0)
+           ON CONFLICT (agent_id) DO NOTHING`,
+          [dbAgentId]
+        );
+      } catch (statsError) {
+        console.log(
+          `Note: Could not initialize agent_stats (table may not exist)`
+        );
+      }
 
       console.log(
         `✅ Auto-registered agent ${agentIdentifier} with DB ID ${dbAgentId}`
