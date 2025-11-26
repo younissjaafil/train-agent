@@ -79,9 +79,9 @@ class KnowledgeBaseService {
         throw new Error(`Agent not found: ${agentId}`);
       }
 
-      // Get instructor (user) ID from agent
+      // Get creator (user) ID from agent
       const agentResult = await client.query(
-        "SELECT instructor_id FROM agents WHERE id = $1",
+        "SELECT creator_id FROM agents WHERE id = $1",
         [dbAgentId]
       );
 
@@ -89,7 +89,7 @@ class KnowledgeBaseService {
         throw new Error(`Agent not found: ${agentId}`);
       }
 
-      const instructorId = agentResult.rows[0].instructor_id;
+      const creatorId = agentResult.rows[0].creator_id;
 
       // Upload to S3 with agent-specific folder structure (agentId/folderType/filename)
       const s3Result = await s3Service.uploadDocument(
@@ -117,7 +117,7 @@ class KnowledgeBaseService {
          VALUES ($1, $2, $3, $4, $5, $6, $7) 
          RETURNING id`,
         [
-          instructorId,
+          creatorId,
           dbAgentId,
           originalName,
           s3Result.publicUrl,
