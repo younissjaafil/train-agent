@@ -165,6 +165,64 @@ class DatabaseService {
       return null;
     }
   }
+
+  /**
+   * Get or create agent ID by agent identifier
+   * Auto-registers agent if it doesn't exist
+   * @param {string} agentIdentifier - Agent UUID (new agents) or ID (existing)
+   * @param {Object} agentData - Optional agent data for creation
+   * @returns {Promise<number>} Database agent ID
+   */
+  async getOrCreateAgentId(agentIdentifier, agentData = {}) {
+    let dbAgentId = await this.getAgentId(agentIdentifier);
+
+    if (!dbAgentId) {
+      // Agent doesn't exist - auto-register it
+      console.log(`Agent ${agentIdentifier} not found - auto-registering...`);
+
+      // Get or create default instructor user
+      const instructorUserId = agentData.instructorUserId || "AUTO_REGISTERED";
+      const instructorId = await this.getOrCreateUserId(instructorUserId, {
+        name: agentData.instructorName || "Auto-registered Instructor",
+        email:
+          agentData.instructorEmail || `${instructorUserId}@auto.generated`,
+        password: "auto_generated",
+        role: "instructor",
+        campus: "default",
+      });
+
+      // Create new agent
+      const result = await this.query(
+        `INSERT INTO agents (instructor_id, name, description, model_type, temperature, visibility)
+         VALUES ($1, $2, $3, $4, $5, $6::visibility_type)
+         RETURNING id`,
+        [
+          instructorId,
+          agentData.name || `Agent ${agentIdentifier.substring(0, 8)}`,
+          agentData.description || "Auto-registered agent for training",
+          agentData.modelType || "gpt-4",
+          agentData.temperature || 0.7,
+          agentData.visibility || "private",
+        ]
+      );
+
+      dbAgentId = result.rows[0].id;
+
+      // Initialize agent stats
+      await this.query(
+        `INSERT INTO agent_stats (agent_id, total_conversations, total_messages, avg_rating)
+         VALUES ($1, 0, 0, 0.0)
+         ON CONFLICT (agent_id) DO NOTHING`,
+        [dbAgentId]
+      );
+
+      console.log(
+        `✅ Auto-registered agent ${agentIdentifier} with DB ID ${dbAgentId}`
+      );
+    }
+
+    return dbAgentId;
+  }
 }
 
 module.exports = new DatabaseService();

@@ -73,11 +73,13 @@ class KnowledgeBaseService {
 
       console.log(`Processing document for agent ${agentId}: ${originalName}`);
 
-      // Get agent from database and verify it exists
-      const dbAgentId = await this.db.getAgentId(agentId);
-      if (!dbAgentId) {
-        throw new Error(`Agent not found: ${agentId}`);
-      }
+      // Get or auto-create agent in database
+      const dbAgentId = await this.db.getOrCreateAgentId(agentId, {
+        name: `Agent ${agentId.substring(0, 8)}`,
+        description: "Auto-registered agent from training upload",
+      });
+
+      console.log(`Using agent DB ID: ${dbAgentId} for UUID: ${agentId}`);
 
       // Get creator (user) ID from agent
       const agentResult = await client.query(
@@ -247,10 +249,11 @@ class KnowledgeBaseService {
 
       console.log(`Searching knowledge base for agent ${agentId}: "${query}"`);
 
-      // Get agent database ID
+      // Get agent database ID (don't auto-create for search - just return empty results)
       const dbAgentId = await this.db.getAgentId(agentId);
       if (!dbAgentId) {
-        throw new Error(`Agent not found: ${agentId}`);
+        console.log(`Agent ${agentId} not found - returning empty results`);
+        return [];
       }
 
       // ✅ COMPREHENSIVE LOGGING: Track search parameters
@@ -441,6 +444,9 @@ class KnowledgeBaseService {
     try {
       const dbAgentId = await this.db.getAgentId(agentId);
       if (!dbAgentId) {
+        console.log(
+          `Agent ${agentId} not found - returning empty document list`
+        );
         return {
           documents: [],
           pagination: { total: 0, offset: 0, limit: 20, hasMore: false },
@@ -539,7 +545,9 @@ class KnowledgeBaseService {
 
       const dbAgentId = await this.db.getAgentId(agentId);
       if (!dbAgentId) {
-        throw new Error("Agent not found");
+        throw new Error(
+          `Agent not found: ${agentId}. Cannot delete documents for non-existent agent.`
+        );
       }
 
       // Get document info
