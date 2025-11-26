@@ -73,13 +73,15 @@ class KnowledgeBaseService {
 
       console.log(`Processing document for agent ${agentId}: ${originalName}`);
 
-      // Get or auto-create agent in database
-      const dbAgentId = await this.db.getOrCreateAgentId(agentId, {
-        name: `Agent ${agentId.substring(0, 8)}`,
-        description: "Auto-registered agent from training upload",
-      });
+      // Get agent from database and verify it exists
+      const dbAgentId = await this.db.getAgentId(agentId);
+      if (!dbAgentId) {
+        throw new Error(
+          `Agent not found: ${agentId}. Please ensure the agent exists in the database.`
+        );
+      }
 
-      console.log(`Using agent DB ID: ${dbAgentId} for UUID: ${agentId}`);
+      console.log(`Using agent DB ID: ${dbAgentId}`);
 
       // Get creator (user) ID from agent
       const agentResult = await client.query(
